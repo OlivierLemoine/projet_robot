@@ -1,0 +1,470 @@
+#include "main.h"
+
+xSemaphoreHandle semCapteurs = NULL;
+xSemaphoreHandle semCmd = NULL;
+
+int16_t usDist[2];
+int16_t irDist[2];
+
+int dcR = 100; //duty cycle Droit et gauche
+int dcL = 100;
+
+int turnR = 0;
+int turnL = 0;
+
+char stateMachineMode = 1;
+char manualMode = 0;
+
+enum stateAutomaton
+{
+    AVANCER,
+    TOURNER
+};
+
+// Déclaration des objets synchronisants !! Ne pas oublier de les créer
+// xSemaphoreHandle xSemaphore = NULL;
+// xQueueHandle qh = NULL;
+
+struct AMessage
+{
+    char command;
+    int data;
+};
+
+//========================================================
+static void
+task_stateMachine(void *pvParameters)
+{
+    enum stateAutomaton innerState = AVANCER;
+    while (1)
+    {
+        if (stateMachineMode)
+        {
+            turnR = 0;
+            turnL = 0;
+
+            if (innerState == AVANCER)
+            {
+                xSemaphoreTake(semCmd, portMAX_DELAY);
+                dcR = 120;
+                dcL = 120;
+                xSemaphoreGive(semCmd);
+                xSemaphoreTake(semCapteurs, portMAX_DELAY);
+                if (irDist[0] > 2000 || irDist[1] > 2000 || usDist[0] < 25)
+                {
+                    xSemaphoreGive(semCapteurs);
+                    innerState = TOURNER;
+                }
+                else
+                    xSemaphoreGive(semCapteurs);
+            }
+            else
+            {
+                xSemaphoreTake(semCmd, portMAX_DELAY);
+                dcR = 120;
+                dcL = 80;
+                xSemaphoreGive(semCmd);
+                vTaskDelay(2000);
+                innerState = AVANCER;
+            }
+        }
+        else
+        {
+            xSemaphoreTake(semCapteurs, portMAX_DELAY);
+            xSemaphoreTake(semCmd, portMAX_DELAY);
+            if ((irDist[0] > 2000 || irDist[1] > 2000) && dcR > 100 && dcL > 100)
+            {
+                xSemaphoreGive(semCapteurs);
+                dcR = 100;
+                dcL = 100;
+                xSemaphoreGive(semCmd);
+            }
+            else if (usDist[0] < 25 && dcR < 100 && dcL < 100)
+            {
+                xSemaphoreGive(semCapteurs);
+                dcR = 100;
+                dcL = 100;
+                xSemaphoreGive(semCmd);
+            }
+            else
+            {
+                xSemaphoreGive(semCapteurs);
+                xSemaphoreGive(semCmd);
+            }
+        }
+
+        vTaskDelay(100);
+    }
+}
+
+static void task_capteurs(void *pvParameters)
+{
+    for (;;)
+    {
+        captDistUS_Measure(0xE2);
+        captDistUS_Measure(0xE3);
+        vTaskDelay(70);
+        xSemaphoreTake(semCapteurs, portMAX_DELAY);
+        captDistIR_Get(irDist);
+        usDist[0] = captDistUS_Get(0xE2);
+        usDist[1] = captDistUS_Get(0xE3);
+        xSemaphoreGive(semCapteurs);
+        vTaskDelay(30);
+    }
+}
+
+static void task_read_zigbee(void *pvParameters)
+{
+    char prevChar = 0;
+    for (;;)
+    {
+        char new_cmd;
+        while (!get_rec_buf(&new_cmd))
+            vTaskDelay(10);
+
+        if ((new_cmd & 0x80) == 0)
+        {
+            if ((new_cmd & 0x40) == 0)
+            {
+                if ((new_cmd & 0x20) == 1)
+                {
+                    manualMode = 1;
+                    stateMachineMode = 0;
+                }
+                else if ((new_cmd & 0x10) == 1)
+                {
+                    manualMode = 0;
+                    stateMachineMode = 1;
+                }
+            }
+            else if (manualMode)
+            { // clavier
+                if (new_cmd & 0x20)
+                { //appuye
+                    if (new_cmd & 0x10)
+                    {
+                        xSemaphoreTake(semCmd, portMAX_DELAY);
+                        dcR = 100;
+                        dcL = 100;
+                        xSemaphoreGive(semCmd);
+                    }
+                    else if (new_cmd & 0x1)
+                    { //z
+                        xSemaphoreTake(semCmd, portMAX_DELAY);
+                        dcR = 150;
+                        dcL = 150;
+                        xSemaphoreGive(semCmd);
+                    }
+                    else if (new_cmd & 0x2)
+                    { //s
+                        xSemaphoreTake(semCmd, portMAX_DELAY);
+                        dcR = 50;
+                        dcL = 50;
+                        xSemaphoreGive(semCmd);
+                    }
+                    else if (new_cmd & 0x4)
+                    { //q
+                        xSemaphoreTake(semCmd, portMAX_DELAY);
+                        turnL = -30;
+                        turnR = 30;
+                        xSemaphoreGive(semCmd);
+                    }
+                    else if (new_cmd & 0x8)
+                    { //d
+                        xSemaphoreTake(semCmd, portMAX_DELAY);
+                        turnL = 30;
+                        turnR = -30;
+                        xSemaphoreGive(semCmd);
+                    }
+                }
+                else
+                { //relache
+                    if (new_cmd & 0x1)
+                    { //z
+                        xSemaphoreTake(semCmd, portMAX_DELAY);
+                        dcR = 100;
+                        dcL = 100;
+                        xSemaphoreGive(semCmd);
+                    }
+                    else if (new_cmd & 0x2)
+                    { //s
+                        xSemaphoreTake(semCmd, portMAX_DELAY);
+                        dcR = 100;
+                        dcL = 100;
+                        xSemaphoreGive(semCmd);
+                    }
+                    else if (new_cmd & 0x4)
+                    { //q
+                        xSemaphoreTake(semCmd, portMAX_DELAY);
+                        turnL = 0;
+                        turnR = 0;
+                        xSemaphoreGive(semCmd);
+                    }
+                    else if (new_cmd & 0x8)
+                    { //d
+                        xSemaphoreTake(semCmd, portMAX_DELAY);
+                        turnL = 0;
+                        turnR = 0;
+                        xSemaphoreGive(semCmd);
+                    }
+                }
+            }
+        }
+        else if (manualMode)
+        {
+            if (prevChar == 0)
+            { //wait for char nro 2
+                prevChar = new_cmd;
+            }
+            else
+            {
+                int val1 = new_cmd & 0x7F * 200 / 127;
+                int val2 = prevChar & 0x7F * 200 / 127;
+                xSemaphoreTake(semCmd, portMAX_DELAY);
+                dcR = val1;
+                dcL = val1;
+                turnL = val2;
+                turnL = -val2;
+                xSemaphoreGive(semCmd);
+                prevChar = 0;
+            }
+        }
+
+        vTaskDelay(50);
+    }
+}
+
+static void task_setSpeedL(void *pvParameters)
+//Permet de modifier la vitesse de la roue droite, en fonction de la valeur du capteur Ultrason droit
+{
+    while (1)
+    {
+
+        const float kp = 0.9070047981;
+        const float ki = 0.1;
+
+        static float prevValue = 0;
+
+        // xSemaphoreTake(semIR, portMAX_DELAY);
+        // if (irDist[0] > 2500 || irDist[1] > 2500)
+        // {
+        //     dc = 100;
+        // }
+        // xSemaphoreGive(semIR);
+        float mes = quadEncoder_GetSpeedL();
+        xSemaphoreTake(semCmd, portMAX_DELAY);
+        float consigne = dcL + turnL;
+        xSemaphoreGive(semCmd);
+
+        consigne = (consigne - 100) * 100;
+
+        float err = consigne - mes;
+
+        err *= kp;
+        float u = err;
+        u *= ki;
+
+        u += prevValue;
+        prevValue = u;
+
+        int command = (u + err) / 100 + 100;
+        if (command > 200)
+            command = 200;
+        if (command < 0)
+            command = 0;
+
+        motorLeft_SetDuty(command);
+        vTaskDelay(5);
+    }
+}
+
+static void task_setSpeedR(void *pvParameters)
+//Permet de modifier la vitesse de la roue gauche, en fonction de la valeur du capteur IR gauche
+{
+    while (1)
+    {
+        const float kp = 0.9098518761;
+        const float ki = 0.1;
+
+        static float prevValue = 0;
+
+        // xSemaphoreTake(semIR, portMAX_DELAY);
+        // if (irDist[0] > 2500 || irDist[1] > 2500)
+        // {
+        //     dc = 100;
+        // }
+        // xSemaphoreGive(semIR);
+        float mes = quadEncoder_GetSpeedR();
+        xSemaphoreTake(semCmd, portMAX_DELAY);
+        float consigne = dcR + turnR;
+        xSemaphoreGive(semCmd);
+
+        consigne = (consigne - 100) * 100;
+
+        float err = consigne - mes;
+
+        err *= kp;
+        double u = err;
+        u *= ki;
+
+        u += prevValue;
+        prevValue = u;
+
+        int command = (u + err) / 100 + 100;
+        if (command > 200)
+            command = 200;
+        if (command < 0)
+            command = 0;
+
+        motorRight_SetDuty(command);
+        vTaskDelay(5);
+    }
+}
+
+static void task_getColor(void *pvParameters)
+{
+    while (1)
+    {
+        static int16_t posx = 90;
+        static int16_t posy = 90;
+
+        int16_t xy[2];
+        int16_t vh[2];
+        pixyCam_Get(xy, vh);
+
+        if (xy[0] > 155 && xy[0] < 300)
+        {
+            posx -= 1;
+        }
+        else if (xy[0] < 145)
+        {
+            posx += 1;
+        }
+        if (xy[1] > 60)
+        {
+            posy += 1;
+        }
+        else if (xy[1] < 50)
+        {
+            posy -= 1;
+        }
+
+        if (posx < 10)
+        {
+            posx = 10;
+        }
+        else if (posx > 260)
+        {
+            posx = 260;
+        }
+        if (posy < 10)
+        {
+            posy = 10;
+        }
+        else if (posy > 100)
+        {
+            posy = 100;
+        }
+
+        servoLow_Set(posx);
+        // servoLow_Set(50);
+        HAL_Delay(50);
+        servoHigh_Set(posy);
+        // servoLow_Set(100);
+        // HAL_Delay(1000);
+
+        term_printf("in : %d : %d \n", xy[0], xy[1]);
+        term_printf("out: %d : %d \n", posx, posy);
+    }
+}
+
+// static void task_E(void *pvParameters)
+// {
+//     struct AMessage pxMessage;
+//     pxMessage.command = 'a';
+//     pxMessage.data = 10;
+//     vTaskDelay(1000);
+//     for (;;)
+//     {
+//         term_printf("TASK E \n\r");
+//         xQueueSend(qh, (void *)&pxMessage, portMAX_DELAY);
+//         xSemaphoreTake(xSemaphore, portMAX_DELAY);
+//         vTaskDelay(SAMPLING_PERIOD_ms);
+//     }
+// }
+
+// static void task_F(void *pvParameters)
+// {
+//     struct AMessage pxRxedMessage;
+
+//     for (;;)
+//     {
+//         xQueueReceive(qh, &(pxRxedMessage), portMAX_DELAY);
+//         term_printf("TASK F \n\r");
+//         xSemaphoreGive(xSemaphore);
+//     }
+// }
+//=========================================================
+//	>>>>>>>>>>>>	MAIN	<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+//=========================================================
+
+int main(void)
+{
+    HAL_Init();
+    SystemClock_Config();
+
+    uart2_Init(); // CABLE
+    uart6_Init(); // ZIGBEE
+    i2c1_Init();
+    spi1Init();
+    pixyCam_Init();      // Caméra Pixy
+    captDistIR_Init();   // Capteurs Infrarouge
+    quadEncoder_Init();  // Encodeurs Incrémentaux
+    motorCommand_Init(); // Commande des Hacheurs
+    servoCommand_Init(); // Commande des Servomoteurs
+
+    HAL_Delay(1000);
+
+    xTaskCreate(task_stateMachine, (const portCHAR *)"task stateMachine", 512 /* stack size */, NULL, tskIDLE_PRIORITY + 1, NULL);
+    xTaskCreate(task_capteurs, (const portCHAR *)"task capteursIR", 512 /* stack size */, NULL, tskIDLE_PRIORITY + 1, NULL);
+    // xTaskCreate(task_getColor, (const portCHAR *)"task getcolor", 512 /* stack size */, NULL, tskIDLE_PRIORITY + 1, NULL);
+    xTaskCreate(task_read_zigbee, (const portCHAR *)"task read zigbee", 512 /* stack size */, NULL, tskIDLE_PRIORITY + 2, NULL);
+    xTaskCreate(task_setSpeedR, (const portCHAR *)"task setSpeedR", 512 /* stack size */, NULL, tskIDLE_PRIORITY + 2, NULL);
+    xTaskCreate(task_setSpeedL, (const portCHAR *)"task setSpeedL", 512 /* stack size */, NULL, tskIDLE_PRIORITY + 2, NULL);
+
+    vSemaphoreCreateBinary(semCapteurs);
+    vSemaphoreCreateBinary(semCmd);
+
+    // vSemaphoreCreateBinary(xSemaphore);
+    // xSemaphoreTake(xSemaphore, portMAX_DELAY);
+    // qh = xQueueCreate(1, sizeof(struct AMessage));
+
+    vTaskStartScheduler();
+
+    return 0;
+}
+
+//=================================================================
+// Called if stack overflow during execution
+extern void vApplicationStackOverflowHook(xTaskHandle *pxTask,
+                                          signed char *pcTaskName)
+{
+    //term_printf("stack overflow %x %s\r\n", pxTask, (portCHAR *)pcTaskName);
+    /* If the parameters have been corrupted then inspect pxCurrentTCB to
+	 * identify which task has overflowed its stack.
+	 */
+    for (;;)
+    {
+    }
+}
+//=================================================================
+//This function is called by FreeRTOS idle task
+extern void vApplicationIdleHook(void)
+{
+}
+//=================================================================
+// brief This function is called by FreeRTOS each tick
+extern void vApplicationTickHook(void)
+{
+    //	HAL_IncTick();
+}
